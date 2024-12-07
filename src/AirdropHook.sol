@@ -13,6 +13,9 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {stdMath} from "forge-std/stdMath.sol";
 import {console} from "forge-std/console.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import {Client} from "@chainlink/contracts-ccip/src/v0.8/ccip/libraries/Client.sol";
+import {IRouterClient} from "@chainlink/contracts-ccip/src/v0.8/ccip/interfaces/IRouterClient.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract Airdrop is BaseHook {
     using PoolIdLibrary for PoolKey;
@@ -30,8 +33,10 @@ contract Airdrop is BaseHook {
     // Mapping to store tokenB balances before the swap for each user
     // mapping(address => uint256) public preSwapBalances;
 
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
-  
+    IRouterClient public immutable router;
+    
+    constructor(IPoolManager _poolManager, address _router) BaseHook(_poolManager) {
+        router = IRouterClient(_router);
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -60,45 +65,82 @@ contract Airdrop is BaseHook {
 
     struct MyData {
       int128 amount;
-      uint256 postSwapBalance;
-      uint256 amountPerAddress;
       Currency toSend;
     }
 
     struct Receiver {
-      uint256 chainId;
+      uint64 destinationChainSelector;
       address receiver;
     }
 
-    function afterSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata swapParams, BalanceDelta delta, bytes calldata hookData)
-        external
-        override
-        returns (bytes4, int128)
-    {
-        
+    function afterSwap(
+        address,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata swapParams,
+        BalanceDelta delta,
+        bytes calldata hookData
+    ) external override returns (bytes4, int128) {
+        Receiver memory receiver = abi.decode(hookData, (Receiver));
+
         MyData memory data = MyData({
           amount: 0,
-          postSwapBalance: 0,
-          amountPerAddress: 0,
           toSend: Currency.wrap(address(0))
         });
 
+
         if(swapParams.zeroForOne) {
-          data.toSend = (key.currency1);
-          data.amount = delta.amount1();
+            data.toSend = (key.currency1);
+            data.amount = delta.amount1();
         } else {
-          data.toSend = key.currency0;
-          data.amount = delta.amount0();
+            data.toSend = key.currency0;
+            data.amount = delta.amount0();
         }
 
-        // 5% of the output as airdrop with max cap of 100 tokens
-        uint256 airdropAmount = Math.min(uint256(stdMath.abs(data.amount)) / 20, 100 * uint256(ERC20(Currency.unwrap(data.toSend)).decimals()));
+        address tokenAddress = Currency.unwrap(data.toSend);
+        uint256 swapAmount = uint256(stdMath.abs(data.amount));
+        
+        // Calculate 5% airdrop with max cap of 100 tokens
+        uint256 airdropAmount = Math.min(
+            swapAmount / 20, 
+            100 * uint256(ERC20(tokenAddress).decimals())
+        );
 
-        // Airdrop if balance is sufficient
-        if (ERC20(Currency.unwrap(data.toSend)).balanceOf(address(this)) >=  uint256(stdMath.abs(data.amount)) + airdropAmount) {
-          IERC20(Currency.unwrap(data.toSend)).transfer(msg.sender, airdropAmount);
-        }
+        // Total amount to send cross-chain (swap result + airdrop)
+        uint256 totalAmount = swapAmount + airdropAmount;
+
+        // // Check if contract has sufficient balance for both swap and airdrop
+        require(
+            ERC20(tokenAddress).balanceOf(address(this)) >= totalAmount,
+            "Insufficient balance for swap + airdrop"
+        );
+
+        // Prepare CCIP message with total amount
+        Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
+            receiver: abi.encode(receiver.receiver),
+            data: "",
+            tokenAmounts: _buildTokenAmounts(tokenAddress, totalAmount),
+            extraArgs: "",
+            feeToken: address(0) // Use native for fees
+        });
+
+        // Approve router to spend tokens
+        IERC20(tokenAddress).approve(address(router), totalAmount);
+
+        // Send tokens cross-chain (including both swap result and airdrop)
+        router.ccipSend(
+            receiver.destinationChainSelector,
+            message
+        );
 
         return (BaseHook.afterSwap.selector, 0);
+    }
+
+    function _buildTokenAmounts(address token, uint256 amount) internal pure returns (Client.EVMTokenAmount[] memory) {
+        Client.EVMTokenAmount[] memory tokenAmounts = new Client.EVMTokenAmount[](1);
+        tokenAmounts[0] = Client.EVMTokenAmount({
+            token: token,
+            amount: amount
+        });
+        return tokenAmounts;
     }
 }

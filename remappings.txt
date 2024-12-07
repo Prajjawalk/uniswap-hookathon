@@ -7,3 +7,5 @@ v4-core/=lib/v4-core/
 v4-periphery/=lib/v4-periphery/
 @openzeppelin/contracts/=lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/
 @openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/
+@chainlink/contracts-ccip/=lib/ccip/contracts/
+@chainlink/local/=lib/chainlink-local/
